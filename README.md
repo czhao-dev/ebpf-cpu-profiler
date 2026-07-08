@@ -14,17 +14,49 @@ Architecturally: a **C** eBPF program attached to `perf_event_open` software CPU
 
 ## Table of Contents
 
+- [Repository Layout](#repository-layout)
 - [How It Works](#how-it-works)
   - [eBPF Sampling Program](#ebpf-sampling-program)
   - [BPF Map Design](#bpf-map-design)
   - [Symbol Resolution](#symbol-resolution)
   - [Flame Graph Rendering](#flame-graph-rendering)
-- [Repository Layout](#repository-layout)
 - [Building](#building)
 - [Usage](#usage)
 - [Testing](#testing)
 - [Design Decisions](#design-decisions)
 - [References](#references)
+
+## Repository Layout
+
+```text
+.
+├── Cargo.toml                    # workspace: profiler-common, profiler
+├── profiler-common/              # shared struct(s) generated from profiler.h via bindgen
+├── profiler-bpf/                 # C sources for the eBPF program (not a cargo crate)
+│   ├── include/profiler.h        # struct sample_key - single source of truth, C + Rust
+│   ├── bpf_helpers.h             # vendored minimal SEC()/map-def/helper declarations
+│   └── profiler.bpf.c            # the eBPF sampling program
+├── tools/gen-vmlinux.sh          # regenerate vmlinux.h from a running kernel's BTF (not yet needed, see above)
+├── profiler/                     # the userspace Rust daemon
+│   ├── build.rs                  # invokes `clang -target bpf` to compile profiler.bpf.c
+│   ├── src/
+│   │   ├── main.rs / lib.rs      # composition root (Linux-only `run()`; other OSes print an error)
+│   │   ├── cli.rs                # clap CLI (`record` subcommand)
+│   │   ├── perf.rs               # perf_event_open attach across all online CPUs (Linux/aya)
+│   │   ├── maps.rs               # BPF map draining + frame-chain reconstruction (Linux/aya)
+│   │   ├── kallsyms.rs           # /proc/kallsyms parser + resolver
+│   │   ├── usersym.rs            # /proc/<pid>/maps + ELF symbol table resolver, with caching
+│   │   ├── symbolize.rs          # kernel/user resolver facade + Frame/FrameKind types
+│   │   ├── folded.rs             # folded-stack aggregation and text emission
+│   │   └── svg.rs                # native SVG flame graph renderer
+│   └── tests/
+│       ├── fixtures/             # small prebuilt Linux ELF used by usersym.rs tests
+│       └── integration.rs        # Linux-only, #[ignore]'d end-to-end test
+├── examples/cpu_bound.c          # recursive Fibonacci workload for the integration test
+└── README.md
+```
+
+`perf.rs` and `maps.rs` (and the `linux` composition path in `lib.rs`) are gated with `#[cfg(target_os = "linux")]` and depend on `aya`, which itself only builds on Linux. Every other module (`cli`, `kallsyms`, `usersym`, `symbolize`, `folded`, `svg`) is plain, cross-platform Rust and fully unit-tested without a Linux host.
 
 ## How It Works
 
@@ -121,38 +153,6 @@ main;work;io_wait;epoll_wait 87
 ```
 
 Each line is a semicolon-separated call chain (outermost frame first, user frames then kernel frames) followed by the sample count — the canonical input for Brendan Gregg's `flamegraph.pl`. The daemon also includes a native SVG renderer ([`profiler/src/svg.rs`](profiler/src/svg.rs)) so there is no Perl dependency: an icicle layout, color-coded by frame kind (kernel = orange, user = blue, unknown = grey), with embedded click-to-zoom and `/`-triggered regex search — no external JS libraries.
-
-## Repository Layout
-
-```text
-.
-├── Cargo.toml                    # workspace: profiler-common, profiler
-├── profiler-common/              # shared struct(s) generated from profiler.h via bindgen
-├── profiler-bpf/                 # C sources for the eBPF program (not a cargo crate)
-│   ├── include/profiler.h        # struct sample_key - single source of truth, C + Rust
-│   ├── bpf_helpers.h             # vendored minimal SEC()/map-def/helper declarations
-│   └── profiler.bpf.c            # the eBPF sampling program
-├── tools/gen-vmlinux.sh          # regenerate vmlinux.h from a running kernel's BTF (not yet needed, see above)
-├── profiler/                     # the userspace Rust daemon
-│   ├── build.rs                  # invokes `clang -target bpf` to compile profiler.bpf.c
-│   ├── src/
-│   │   ├── main.rs / lib.rs      # composition root (Linux-only `run()`; other OSes print an error)
-│   │   ├── cli.rs                # clap CLI (`record` subcommand)
-│   │   ├── perf.rs               # perf_event_open attach across all online CPUs (Linux/aya)
-│   │   ├── maps.rs               # BPF map draining + frame-chain reconstruction (Linux/aya)
-│   │   ├── kallsyms.rs           # /proc/kallsyms parser + resolver
-│   │   ├── usersym.rs            # /proc/<pid>/maps + ELF symbol table resolver, with caching
-│   │   ├── symbolize.rs          # kernel/user resolver facade + Frame/FrameKind types
-│   │   ├── folded.rs             # folded-stack aggregation and text emission
-│   │   └── svg.rs                # native SVG flame graph renderer
-│   └── tests/
-│       ├── fixtures/             # small prebuilt Linux ELF used by usersym.rs tests
-│       └── integration.rs        # Linux-only, #[ignore]'d end-to-end test
-├── examples/cpu_bound.c          # recursive Fibonacci workload for the integration test
-└── README.md
-```
-
-`perf.rs` and `maps.rs` (and the `linux` composition path in `lib.rs`) are gated with `#[cfg(target_os = "linux")]` and depend on `aya`, which itself only builds on Linux. Every other module (`cli`, `kallsyms`, `usersym`, `symbolize`, `folded`, `svg`) is plain, cross-platform Rust and fully unit-tested without a Linux host.
 
 ## Building
 
