@@ -49,10 +49,22 @@ pub fn resolve_kernel(kallsyms: &Kallsyms, ip: u64) -> Frame {
 }
 
 pub fn resolve_user(usersyms: &mut UserSymbolCache, pid: u32, ip: u64) -> Frame {
-    match usersyms.resolve(pid, ip) {
-        Some((name, 0)) => Frame::User(name),
-        Some((name, off)) => Frame::User(format!("{name}+0x{off:x}")),
-        None => Frame::Unknown,
+    if let Some((name, off)) = usersyms.resolve(pid, ip) {
+        return labeled(Frame::User, name, off);
+    }
+    // Anonymous mappings (JIT-compiled code) have no ELF symbol table for
+    // `resolve` to find; fall back to a JIT engine's own map file.
+    if let Some((name, off)) = usersyms.resolve_jit(pid, ip) {
+        return labeled(Frame::Jit, name, off);
+    }
+    Frame::Unknown
+}
+
+fn labeled(ctor: fn(String) -> Frame, name: String, offset: u64) -> Frame {
+    if offset == 0 {
+        ctor(name)
+    } else {
+        ctor(format!("{name}+0x{offset:x}"))
     }
 }
 

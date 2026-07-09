@@ -30,7 +30,7 @@ impl JitSymbolTable {
         Ok(Self::parse(&text))
     }
 
-    fn parse(text: &str) -> Self {
+    pub(crate) fn parse(text: &str) -> Self {
         let mut entries: Vec<(u64, u64, String)> =
             text.lines().filter_map(parse_map_line).collect();
         entries.sort_by_key(|(start, _, _)| *start);

@@ -44,12 +44,14 @@ pub fn drain_into(
         );
     }
 
-    // Refresh /proc/<pid>/maps once per distinct pid seen this cycle,
-    // since mmap/exec can change mappings between drain cycles.
+    // Refresh /proc/<pid>/maps and any /tmp/perf-<pid>.map once per
+    // distinct pid seen this cycle, since mmap/exec/JIT compilation can
+    // change mappings and symbols between drain cycles.
     let mut seen_pids = HashSet::new();
     for (key, _) in &samples {
         if seen_pids.insert(key.tgid) {
             let _ = usersyms.refresh_proc_maps(key.tgid);
+            let _ = usersyms.refresh_jit_map(key.tgid);
         }
     }
 

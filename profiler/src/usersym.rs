@@ -7,6 +7,8 @@ use std::path::Path;
 
 use object::{Object, ObjectSymbol, SymbolKind};
 
+use crate::jitsym::JitSymbolTable;
+
 #[derive(Clone, Debug)]
 pub struct MapEntry {
     pub start: u64,
@@ -127,6 +129,7 @@ fn collect_text_symbols(file: &object::File, dynamic: bool) -> Vec<(u64, String)
 pub struct UserSymbolCache {
     tables: HashMap<(u64, u64), BinarySymbolTable>,
     proc_maps: HashMap<u32, ProcMaps>,
+    jit_tables: HashMap<u32, JitSymbolTable>,
 }
 
 impl UserSymbolCache {
@@ -134,6 +137,7 @@ impl UserSymbolCache {
         Self {
             tables: HashMap::new(),
             proc_maps: HashMap::new(),
+            jit_tables: HashMap::new(),
         }
     }
 
@@ -145,9 +149,22 @@ impl UserSymbolCache {
         Ok(())
     }
 
+    /// Re-reads `/tmp/perf-<pid>.map`, if one exists. Call once per drain
+    /// cycle before resolving IPs for `pid`, mirroring `refresh_proc_maps`:
+    /// a JIT engine can emit new symbols between cycles.
+    pub fn refresh_jit_map(&mut self, pid: u32) -> anyhow::Result<()> {
+        self.jit_tables.insert(pid, JitSymbolTable::load(pid)?);
+        Ok(())
+    }
+
     #[cfg(test)]
     fn set_proc_maps(&mut self, pid: u32, maps: ProcMaps) {
         self.proc_maps.insert(pid, maps);
+    }
+
+    #[cfg(test)]
+    fn set_jit_table(&mut self, pid: u32, table: JitSymbolTable) {
+        self.jit_tables.insert(pid, table);
     }
 
     pub fn resolve(&mut self, pid: u32, ip: u64) -> Option<(String, u64)> {
@@ -165,6 +182,16 @@ impl UserSymbolCache {
         table
             .resolve(file_vaddr)
             .map(|(name, off)| (name.to_string(), off))
+    }
+
+    /// Falls back to a JIT engine's `/tmp/perf-<pid>.map` symbols
+    /// (populated by `refresh_jit_map`) for addresses `resolve` can't
+    /// reach - JIT-compiled code lives in anonymous mappings, which have
+    /// no backing ELF file for `resolve`'s `/proc/<pid>/maps` lookup to
+    /// find.
+    pub fn resolve_jit(&self, pid: u32, ip: u64) -> Option<(String, u64)> {
+        let (name, off) = self.jit_tables.get(&pid)?.resolve(ip)?;
+        Some((name.to_string(), off))
     }
 
     pub fn cached_binary_count(&self) -> usize {
@@ -229,5 +256,36 @@ mod tests {
         assert_eq!(first, Some(("helper_one".to_string(), 0)));
         assert_eq!(second, Some(("helper_two".to_string(), 0)));
         assert_eq!(cache.cached_binary_count(), 1);
+    }
+
+    #[test]
+    fn resolve_jit_finds_addresses_in_anonymous_mappings() {
+        // No /proc/<pid>/maps entry at all for this pid, matching a
+        // process whose JIT code lives outside any tracked mapping.
+        let mut cache = UserSymbolCache::new();
+        cache.set_jit_table(
+            99,
+            JitSymbolTable::parse("7f0000000000 40 LazyCompile:*hot /app.js:1:1\n"),
+        );
+
+        assert_eq!(cache.resolve(99, 0x7f0000000010), None);
+        assert_eq!(
+            cache.resolve_jit(99, 0x7f0000000010),
+            Some(("LazyCompile:*hot /app.js:1:1".to_string(), 0x10))
+        );
+    }
+
+    #[test]
+    fn resolve_jit_is_independent_of_elf_resolution() {
+        // ELF resolution for a tracked pid must be unaffected by an
+        // unrelated pid's JIT table.
+        let mut cache = UserSymbolCache::new();
+        let fixture = fixture_path().to_str().unwrap().to_string();
+        let maps_text = format!("00000000-00001000 r-xp 00000000 08:01 999 {fixture}\n");
+        cache.set_proc_maps(42, ProcMaps::parse(&maps_text));
+        cache.set_jit_table(99, JitSymbolTable::parse("1000 10 unrelated\n"));
+
+        assert_eq!(cache.resolve(42, 0x0), Some(("helper_one".to_string(), 0)));
+        assert_eq!(cache.resolve_jit(42, 0x0), None);
     }
 }
