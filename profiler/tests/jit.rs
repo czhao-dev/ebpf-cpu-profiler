@@ -63,6 +63,7 @@ fn resolves_jit_compiled_function_names() {
         });
 
     workload.kill().ok();
+    workload.wait().ok();
 
     assert!(
         output.status.success(),

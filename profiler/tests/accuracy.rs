@@ -59,6 +59,7 @@ fn sampled_ratio_matches_burn_workload_split() {
         });
 
     workload.kill().ok();
+    workload.wait().ok();
 
     assert!(
         output.status.success(),

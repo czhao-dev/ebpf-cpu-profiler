@@ -57,6 +57,7 @@ fn profiles_recursive_fibonacci_workload() {
         });
 
     workload.kill().ok();
+    workload.wait().ok();
 
     assert!(
         output.status.success(),

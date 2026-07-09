@@ -59,6 +59,7 @@ fn omitted_frame_pointers_truncate_recursive_stacks() {
         });
 
     workload.kill().ok();
+    workload.wait().ok();
 
     assert!(
         output.status.success(),
