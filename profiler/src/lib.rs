@@ -1,5 +1,6 @@
 pub mod cli;
 pub mod folded;
+pub mod jitsym;
 pub mod kallsyms;
 pub mod svg;
 pub mod symbolize;
