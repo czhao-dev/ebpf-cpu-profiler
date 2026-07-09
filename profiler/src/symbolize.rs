@@ -1,6 +1,6 @@
 //! Ties the kernel (`kallsyms`) and user-space (`usersym`) resolvers
 //! together into a single "resolve this IP" facade, and carries the
-//! kernel/user/unknown distinction through to the SVG renderer for
+//! kernel/user/JIT/unknown distinction through to the SVG renderer for
 //! color-coding.
 
 use crate::kallsyms::Kallsyms;
@@ -10,6 +10,7 @@ use crate::usersym::UserSymbolCache;
 pub enum FrameKind {
     Kernel,
     User,
+    Jit,
     Unknown,
 }
 
@@ -17,13 +18,14 @@ pub enum FrameKind {
 pub enum Frame {
     Kernel(String),
     User(String),
+    Jit(String),
     Unknown,
 }
 
 impl Frame {
     pub fn label(&self) -> String {
         match self {
-            Frame::Kernel(s) | Frame::User(s) => s.clone(),
+            Frame::Kernel(s) | Frame::User(s) | Frame::Jit(s) => s.clone(),
             Frame::Unknown => "[unknown]".to_string(),
         }
     }
@@ -32,6 +34,7 @@ impl Frame {
         match self {
             Frame::Kernel(_) => FrameKind::Kernel,
             Frame::User(_) => FrameKind::User,
+            Frame::Jit(_) => FrameKind::Jit,
             Frame::Unknown => FrameKind::Unknown,
         }
     }
@@ -61,6 +64,7 @@ mod tests {
     fn frame_label_includes_offset_when_nonzero() {
         assert_eq!(Frame::Kernel("do_idle".into()).label(), "do_idle");
         assert_eq!(Frame::User("main+0x10".into()).label(), "main+0x10");
+        assert_eq!(Frame::Jit("LazyCompile:*foo".into()).label(), "LazyCompile:*foo");
         assert_eq!(Frame::Unknown.label(), "[unknown]");
     }
 
@@ -68,6 +72,7 @@ mod tests {
     fn frame_kind_matches_variant() {
         assert_eq!(Frame::Kernel("x".into()).kind(), FrameKind::Kernel);
         assert_eq!(Frame::User("x".into()).kind(), FrameKind::User);
+        assert_eq!(Frame::Jit("x".into()).kind(), FrameKind::Jit);
         assert_eq!(Frame::Unknown.kind(), FrameKind::Unknown);
     }
 }

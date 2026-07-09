@@ -196,6 +196,7 @@ fn color_for(kind: FrameKind) -> &'static str {
     match kind {
         FrameKind::Kernel => "#e08030",
         FrameKind::User => "#3b82c4",
+        FrameKind::Jit => "#8e44ad",
         FrameKind::Unknown => "#b0b0b0",
     }
 }
