@@ -1,0 +1,4 @@
+condition,rps,rss_peak_kb,dropped
+baseline,46818.67,0,no
+profiler,47265.04,30244,no
+perf,48064.94,0,no
