@@ -59,16 +59,16 @@ jobs:
 
       - name: Run ignored integration/accuracy/edge-case/JIT tests (root required)
         run: |
-          sudo env "PATH=$PATH" cargo test -p profiler --test integration -- --ignored --nocapture
-          sudo env "PATH=$PATH" cargo test -p profiler --test accuracy -- --ignored --nocapture
-          sudo env "PATH=$PATH" cargo test -p profiler --test edge_cases -- --ignored --nocapture
-          sudo env "PATH=$PATH" cargo test -p profiler --test jit -- --ignored --nocapture
+          sudo -E env "PATH=$PATH" cargo test -p profiler --test integration -- --ignored --nocapture
+          sudo -E env "PATH=$PATH" cargo test -p profiler --test accuracy -- --ignored --nocapture
+          sudo -E env "PATH=$PATH" cargo test -p profiler --test edge_cases -- --ignored --nocapture
+          sudo -E env "PATH=$PATH" cargo test -p profiler --test jit -- --ignored --nocapture
 
       - name: Perf differential test
         run: |
           cc -O2 -fno-omit-frame-pointer -fno-optimize-sibling-calls -o /tmp/burn examples/burn.c
-          sudo env "PATH=$PATH" bash tools/diff_vs_perf.sh /tmp/burn 6
+          sudo -E env "PATH=$PATH" bash tools/diff_vs_perf.sh /tmp/burn 6
 
       - name: Overhead benchmark (nginx + wrk)
         run: |
-          sudo env "PATH=$PATH" bash tools/bench_overhead.sh 20 99 | tee -a "$GITHUB_STEP_SUMMARY"
+          sudo -E env "PATH=$PATH" bash tools/bench_overhead.sh 20 99 | tee -a "$GITHUB_STEP_SUMMARY"
