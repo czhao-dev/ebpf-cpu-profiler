@@ -6,10 +6,12 @@
 #
 #   tools/bench_overhead.sh [duration-seconds] [frequency-hz]
 #
-# Emits a markdown results table to stdout, and a raw CSV
+# Emits a markdown results table to stdout, a raw CSV
 # (condition,rps,rss_peak_kb,dropped) to $BENCH_CSV_OUT (default:
-# bench_overhead.csv in the current directory) so results can be
-# plotted later (see tools/plot_benchmark.py) without re-running.
+# bench_overhead.csv in the current directory), and a second CSV of
+# the profiler's RSS sampled once per second (<same name>_rss.csv), so
+# results can be plotted later (see tools/plot_benchmark.py) without
+# re-running.
 set -euo pipefail
 
 DURATION="${1:-20}"
@@ -97,6 +99,14 @@ RSS_PEAK="${RSS_PEAK:-0}"
 DROPPED="no"
 grep -q "near capacity" "$WORKDIR/profiler.stderr" 2>/dev/null && DROPPED="yes"
 echo "profiler,${PROFILER_RPS},${RSS_PEAK},${DROPPED}" >> "$CSV_OUT"
+
+# Persist the RSS-over-time samples too (see tools/plot_benchmark.py) -
+# $RSS_LOG itself lives under $WORKDIR and is deleted on exit.
+RSS_CSV_OUT="${CSV_OUT%.csv}_rss.csv"
+{
+    echo "sample_second,rss_kb"
+    awk '{print NR","$0}' "$RSS_LOG"
+} > "$RSS_CSV_OUT"
 
 # --- Phase 3: perf active, system-wide, at $FREQ Hz ---
 start_nginx
