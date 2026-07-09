@@ -26,7 +26,12 @@ fn sampled_ratio_matches_burn_workload_split() {
     let example_bin = std::env::temp_dir().join("flamegraph_profiler_burn_test");
 
     let status = Command::new("cc")
-        .args(["-O2", "-fno-omit-frame-pointer", "-o"])
+        .args([
+            "-O2",
+            "-fno-omit-frame-pointer",
+            "-fno-optimize-sibling-calls",
+            "-o",
+        ])
         .arg(&example_bin)
         .arg(&example_src)
         .status()

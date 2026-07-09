@@ -10,7 +10,13 @@
  * stay on-CPU throughout the run rather than one dominating an early or
  * late slice of it.
  *
- *   cc -O2 -fno-omit-frame-pointer -o burn burn.c
+ *   cc -O2 -fno-omit-frame-pointer -fno-optimize-sibling-calls -o burn burn.c
+ *
+ * -fno-optimize-sibling-calls matters here specifically: hot_seventy()
+ * and cold_thirty() are each a single tail call to spin(), and without
+ * it the compiler elides their stack frames entirely (turning the call
+ * into a jump), so neither function name would ever show up in a
+ * profile - only spin() calling directly from main().
  *
  * Then, in another terminal:
  *
@@ -19,6 +25,13 @@
 #include <stdio.h>
 
 #define UNIT_ITERS 20000000UL
+
+/* Written by hot_seventy()/cold_thirty() below - purely to give their
+ * otherwise-identical bodies a distinct instruction sequence. Without
+ * this, gcc's identical-code-folding treats the two functions as
+ * duplicates and merges them into one symbol at -O2, so every sample
+ * resolves to whichever name gcc kept and the other never appears. */
+static volatile int marker;
 
 __attribute__((noinline)) static void spin(unsigned long iters)
 {
@@ -29,11 +42,13 @@ __attribute__((noinline)) static void spin(unsigned long iters)
 
 __attribute__((noinline)) static void hot_seventy(void)
 {
+	marker = 1;
 	spin(UNIT_ITERS);
 }
 
 __attribute__((noinline)) static void cold_thirty(void)
 {
+	marker = 2;
 	spin(UNIT_ITERS);
 }
 
