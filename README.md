@@ -5,12 +5,13 @@
 ![Toolchain](https://img.shields.io/badge/toolchain-clang%20%2B%20aya-blueviolet)
 ![Status](https://img.shields.io/badge/status-MVP-yellow)
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)
+[![CI](https://github.com/czhao-dev/ebpf-cpu-profiler/actions/workflows/test.yml/badge.svg)](https://github.com/czhao-dev/ebpf-cpu-profiler/actions/workflows/test.yml)
 
 A low-overhead, system-wide CPU profiler that uses eBPF to sample on-CPU call stacks across all processes at a configurable frequency, resolves instruction pointers to human-readable symbols, and renders an interactive SVG flame graph — with no instrumentation of target programs, no kernel module, and no dependency on `perf` or BCC.
 
-Architecturally: a **C** eBPF program attached to `perf_event_open` software CPU-clock events captures kernel and user-space stacks on every CPU at each sample. A **Rust** user-space daemon (built on [`aya`](https://aya-rs.dev/)) reads the BPF maps, resolves symbols from `/proc/kallsyms` and ELF symbol tables, and emits folded stacks that are either piped into Brendan Gregg's `flamegraph.pl` or rendered natively to a self-contained, interactive SVG with no external dependencies.
+Architecturally: a **C** eBPF program attached to `perf_event_open` software CPU-clock events captures kernel and user-space stacks on every CPU at each sample. A **Rust** user-space daemon (built on [`aya`](https://aya-rs.dev/)) reads the BPF maps, resolves symbols from `/proc/kallsyms`, ELF symbol tables, and JIT engines' `/tmp/perf-<pid>.map` files, and emits folded stacks that are either piped into Brendan Gregg's `flamegraph.pl` or rendered natively to a self-contained, interactive SVG with no external dependencies.
 
-> **Status: MVP.** What's implemented today: on-CPU sampling, frame-pointer stack unwinding, kernel + user symbol resolution, folded-stack output, and the native SVG renderer. **Not yet implemented:** DWARF-based unwinding, off-CPU (scheduler blocking) profiling, differential flame graphs, and speedscope JSON output.
+> **Status: MVP.** What's implemented today: on-CPU sampling, frame-pointer stack unwinding, kernel + user + JIT symbol resolution, folded-stack output, and the native SVG renderer. **Not yet implemented:** DWARF-based unwinding, off-CPU (scheduler blocking) profiling, differential flame graphs, and speedscope JSON output.
 
 ## Table of Contents
 
@@ -23,6 +24,8 @@ Architecturally: a **C** eBPF program attached to `perf_event_open` software CPU
 - [Building](#building)
 - [Usage](#usage)
 - [Testing](#testing)
+- [Edge Cases](#edge-cases)
+- [Benchmarking](#benchmarking)
 - [Design Decisions](#design-decisions)
 - [References](#references)
 
@@ -37,6 +40,11 @@ Architecturally: a **C** eBPF program attached to `perf_event_open` software CPU
 │   ├── bpf_helpers.h             # vendored minimal SEC()/map-def/helper declarations
 │   └── profiler.bpf.c            # the eBPF sampling program
 ├── tools/gen-vmlinux.sh          # regenerate vmlinux.h from a running kernel's BTF (not yet needed, see above)
+├── tools/diff_vs_perf.sh         # differential test: this profiler vs. `perf` on the same workload
+├── tools/foldedcmp.py            # top-function overlap comparison used by diff_vs_perf.sh
+├── tools/bench_overhead.sh       # nginx+wrk overhead benchmark (baseline/profiler/perf)
+├── tools/bench_nginx.conf        # minimal, self-contained nginx config for the benchmark
+├── tools/plot_benchmark.py       # matplotlib charts from bench_overhead.sh's CSV output
 ├── profiler/                     # the userspace Rust daemon
 │   ├── build.rs                  # invokes `clang -target bpf` to compile profiler.bpf.c
 │   ├── src/
@@ -46,17 +54,25 @@ Architecturally: a **C** eBPF program attached to `perf_event_open` software CPU
 │   │   ├── maps.rs               # BPF map draining + frame-chain reconstruction (Linux/aya)
 │   │   ├── kallsyms.rs           # /proc/kallsyms parser + resolver
 │   │   ├── usersym.rs            # /proc/<pid>/maps + ELF symbol table resolver, with caching
-│   │   ├── symbolize.rs          # kernel/user resolver facade + Frame/FrameKind types
+│   │   ├── jitsym.rs             # /tmp/perf-<pid>.map parser (JIT engine symbols)
+│   │   ├── symbolize.rs          # kernel/user/JIT resolver facade + Frame/FrameKind types
 │   │   ├── folded.rs             # folded-stack aggregation and text emission
 │   │   └── svg.rs                # native SVG flame graph renderer
 │   └── tests/
 │       ├── fixtures/             # small prebuilt Linux ELF used by usersym.rs tests
-│       └── integration.rs        # Linux-only, #[ignore]'d end-to-end test
+│       ├── integration.rs        # Linux-only, #[ignore]'d end-to-end test (frame pointers present)
+│       ├── accuracy.rs           # #[ignore]'d: sampled ratio vs. examples/burn.c's known 70/30 split
+│       ├── edge_cases.rs         # #[ignore]'d: truncated stacks when frame pointers are omitted
+│       └── jit.rs                # #[ignore]'d: JIT symbolication against a real Node.js workload
 ├── examples/cpu_bound.c          # recursive Fibonacci workload for the integration test
+├── examples/burn.c               # deterministic 70/30 CPU-split workload for the accuracy test
+├── examples/jit_workload.js      # Node.js busy loop for the JIT symbolication test
+├── docs/images/                  # real flame graphs and benchmark charts (see Benchmarking)
+├── .github/workflows/test.yml    # CI: unit tests + privileged integration/benchmark suite
 └── README.md
 ```
 
-`perf.rs` and `maps.rs` (and the `linux` composition path in `lib.rs`) are gated with `#[cfg(target_os = "linux")]` and depend on `aya`, which itself only builds on Linux. Every other module (`cli`, `kallsyms`, `usersym`, `symbolize`, `folded`, `svg`) is plain, cross-platform Rust and fully unit-tested without a Linux host.
+`perf.rs` and `maps.rs` (and the `linux` composition path in `lib.rs`) are gated with `#[cfg(target_os = "linux")]` and depend on `aya`, which itself only builds on Linux. Every other module (`cli`, `kallsyms`, `usersym`, `jitsym`, `symbolize`, `folded`, `svg`) is plain, cross-platform Rust and fully unit-tested without a Linux host.
 
 ## How It Works
 
@@ -141,7 +157,9 @@ Symbol resolution maps raw instruction pointers back to `function_name(+offset)`
 
 **User-space symbols.** For each unique PID seen in a drain cycle the daemon reads `/proc/<pid>/maps` to find which ELF file and load offset back each virtual address, then parses the file's `.symtab` (falling back to `.dynsym` if stripped) via the [`object`](https://docs.rs/object) crate and binary-searches the sorted symbol table. Parsed tables are cached by `(dev, inode)` so a library shared across hundreds of processes is only parsed once.
 
-Frame-pointer unwinding is the only stack-walking strategy implemented so far: `bpf_get_stackid` walks the `rbp` chain in-kernel for both user and kernel stacks. This requires the target binary to be compiled with `-fno-omit-frame-pointer` (the Linux kernel itself, Go 1.12+, and any C/C++ binary built with the flag all qualify); binaries built with the default `-fomit-frame-pointer` will produce truncated stacks rather than an error.
+**JIT-compiled symbols.** Code emitted by a JIT engine (V8/Node, the JVM) lives in an anonymous `mmap` region with no backing file, so the ELF path above never resolves it. [`profiler/src/jitsym.rs`](profiler/src/jitsym.rs) parses `/tmp/perf-<pid>.map` — the address-range-to-symbol map JIT engines write when run with basic profiling enabled (Node's `--perf-basic-prof`, perf-map-agent for the JVM) — and `usersym.rs`'s `UserSymbolCache::resolve` falls back to it whenever the ELF lookup comes up empty. Resolved frames are tagged `Frame::Jit` and rendered in a distinct color (see below) so they're visually distinguishable from ahead-of-time-compiled user frames. See [Edge Cases](#edge-cases) for a real example.
+
+Frame-pointer unwinding is the only stack-walking strategy implemented so far: `bpf_get_stackid` walks the `rbp` chain in-kernel for both user and kernel stacks. This requires the target binary to be compiled with `-fno-omit-frame-pointer` (the Linux kernel itself, Go 1.12+, and any C/C++ binary built with the flag all qualify); binaries built with the default `-fomit-frame-pointer` will produce truncated stacks rather than an error. See [Edge Cases](#edge-cases).
 
 ### Flame Graph Rendering
 
@@ -152,7 +170,7 @@ main;work;compute;fft_radix2 412
 main;work;io_wait;epoll_wait 87
 ```
 
-Each line is a semicolon-separated call chain (outermost frame first, user frames then kernel frames) followed by the sample count — the canonical input for Brendan Gregg's `flamegraph.pl`. The daemon also includes a native SVG renderer ([`profiler/src/svg.rs`](profiler/src/svg.rs)) so there is no Perl dependency: an icicle layout, color-coded by frame kind (kernel = orange, user = blue, unknown = grey), with embedded click-to-zoom and `/`-triggered regex search — no external JS libraries.
+Each line is a semicolon-separated call chain (outermost frame first, user frames then kernel frames) followed by the sample count — the canonical input for Brendan Gregg's `flamegraph.pl`. The daemon also includes a native SVG renderer ([`profiler/src/svg.rs`](profiler/src/svg.rs)) so there is no Perl dependency: an icicle layout, color-coded by frame kind (kernel = orange, user = blue, JIT = purple, unknown = grey), with embedded click-to-zoom and `/`-triggered regex search — no external JS libraries. See real, profiler-generated examples in [Benchmarking](#benchmarking).
 
 ## Building
 
@@ -205,8 +223,10 @@ Options:
 
 ## Testing
 
+All of the below runs automatically on every push/PR via [`.github/workflows/test.yml`](.github/workflows/test.yml): an unprivileged job for the unit tests and clippy, and a privileged job (root, real eBPF) for everything requiring Linux — see the CI badge at the top of this README.
+
 ```sh
-cargo test --workspace     # pure-logic unit tests: kallsyms, usersym, folded, svg, cli - run anywhere
+cargo test --workspace     # pure-logic unit tests: kallsyms, usersym, jitsym, folded, svg, cli - run anywhere
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
@@ -228,6 +248,76 @@ _start+0x30;__libc_start_main+0x98;__libc_init_first+0x84;main+0x24;fib+0x208;fi
 ```
 
 and the SVG output is well-formed XML containing the same resolved `fib+0x...` frames. The `--ignored` integration test above passes in that environment.
+
+### Accuracy test: a known-ratio workload
+
+[`examples/burn.c`](examples/burn.c) burns CPU in two identically-costed functions, `hot_seventy()` and `cold_thirty()`, called in a fixed 7:3 ratio per round — a ground truth to check the profiler's *sampled* ratio against. [`profiler/tests/accuracy.rs`](profiler/tests/accuracy.rs) profiles it and asserts the sampled split lands within 62-78% (loose on purpose — sampling is statistical) and that the full `main → {hot_seventy,cold_thirty} → spin` call chain is recovered, not just the leaf function name:
+
+```sh
+sudo cargo test -p profiler --test accuracy -- --ignored --nocapture
+```
+
+Building this workload surfaced two real gcc optimizations worth knowing about if you write similar test workloads: at `-O2`, gcc turns a function whose entire body is one tail call into a jump (`-fno-optimize-sibling-calls` disables that), and it merges functions with byte-identical bodies into one symbol (identical-code-folding) unless their code actually differs — see the comment at the top of `burn.c` for how this is worked around.
+
+### Differential test against `perf`
+
+[`tools/diff_vs_perf.sh`](tools/diff_vs_perf.sh) runs this profiler and `perf record`/`perf script` against the same workload/PID/window, collapses perf's output inline (an ~20-line awk script — no vendored `stackcollapse-perf.pl`), and compares the top-5 hottest functions from each via [`tools/foldedcmp.py`](tools/foldedcmp.py)'s Jaccard overlap:
+
+```sh
+cc -O2 -fno-omit-frame-pointer -fno-optimize-sibling-calls -o burn examples/burn.c
+sudo tools/diff_vs_perf.sh ./burn 6
+```
+
+Run for real on the GCP validation VM (see [Benchmarking](#benchmarking)), this profiler and `perf` agreed on 4 of 5 top functions (67% overlap, above the 60% pass threshold) — the expected level of agreement given frame-pointer-only unwinding and perf's own unwinder can legitimately disagree on non-leaf frames while still agreeing on what's actually hot.
+
+## Edge Cases
+
+**Frame pointers omitted.** [`profiler/tests/edge_cases.rs`](profiler/tests/edge_cases.rs) compiles `examples/cpu_bound.c` with `-fomit-frame-pointer` (rather than `integration.rs`'s `-fno-omit-frame-pointer`) and asserts the recursive `fib` call chain is truncated to at most one frame per stack, instead of the full recursion recovered when frame pointers are present. This is the documented, expected behavior of `bpf_get_stackid`'s in-kernel `rbp`-chain walk (see [Design Decisions](#design-decisions)) — not a bug, and not something an eBPF program can work around without a materially different (and much more expensive) unwinding strategy.
+
+```sh
+sudo cargo test -p profiler --test edge_cases -- --ignored --nocapture
+```
+
+**JIT-compiled code (Node.js).** [`profiler/tests/jit.rs`](profiler/tests/jit.rs) runs [`examples/jit_workload.js`](examples/jit_workload.js) under `node --perf-basic-prof`, profiles it, and asserts the JIT-compiled function's name — not `[unknown]`, not a raw hex address — appears in the output, resolved via the `/tmp/perf-<pid>.map` support described in [Symbol Resolution](#symbol-resolution). Skips gracefully if `node` isn't on `PATH` rather than failing, since Node.js isn't a hard dependency of this project.
+
+```sh
+sudo cargo test -p profiler --test jit -- --ignored --nocapture
+```
+
+[`docs/images/jit_flamegraph.svg`](docs/images/jit_flamegraph.svg) is a real flame graph from this test, generated on the GCP validation VM — the purple frames are `hotJitFunction`, resolved entirely from the perf map file since it has no ELF symbol table entry.
+
+## Benchmarking
+
+[`tools/bench_overhead.sh`](tools/bench_overhead.sh) drives nginx with `wrk` under three conditions — baseline, this profiler active system-wide, `perf` active system-wide — and measures request throughput, the profiler's own RSS, and whether it logged a BPF map near-capacity (dropped sample) warning:
+
+```sh
+sudo tools/bench_overhead.sh 20 99          # 20s per phase, 99 Hz
+python3 tools/plot_benchmark.py             # renders the charts below from the CSV it wrote
+```
+
+Real results from a run on a GCP `n2-standard-2` (2 vCPU, Ubuntu 24.04) validation VM, 20s per phase at 99 Hz:
+
+| Condition | RPS | vs. baseline | Profiler RSS peak | Samples dropped |
+|---|---|---|---|---|
+| Baseline | 46,819 | – | – | – |
+| This profiler | 47,265 | +1.0% | ~29.5 MB | no |
+| `perf` | 48,065 | +2.7% | – | – |
+
+![nginx throughput under wrk load, baseline vs. this profiler vs. perf](docs/images/bench_rps.png)
+
+The profiler's RPS impact is within run-to-run measurement noise on this shared 2-vCPU host (it measured *faster* than baseline here, which says more about benchmark variance than genuine speedup) — consistent with the design goal of near-zero overhead, though not a substitute for a dedicated, isolated-hardware benchmark if you need tighter numbers. Userspace RSS held flat at ~29.5MB for the full run with no growth, and no BPF map capacity warnings were logged:
+
+![Profiler RSS sampled once per second over the benchmark run, flat around 29.5MB](docs/images/bench_rss.png)
+
+### Real flame graphs
+
+All three below were generated by `flamegraph-profiler record --format svg` on the GCP validation VM — not synthetic or hand-edited.
+
+- [`docs/images/burn_flamegraph.svg`](docs/images/burn_flamegraph.svg) — profiling `examples/burn.c`; the roughly-even widths of each `hot_seventy`/`cold_thirty` call visually reproduce the 70/30 split (blue = user frames).
+- [`docs/images/jit_flamegraph.svg`](docs/images/jit_flamegraph.svg) — profiling the Node.js JIT workload; purple frames are resolved via `/tmp/perf-<pid>.map`.
+- [`docs/images/system_flamegraph.svg`](docs/images/system_flamegraph.svg) — system-wide capture during the nginx+wrk benchmark, showing both kernel (orange) and user (blue) frames.
+
+GitHub renders `.svg` files inline — click through to any of the three to view and interact with them (they're the same self-contained, click-to-zoom, `/`-search SVGs described in [Flame Graph Rendering](#flame-graph-rendering)).
 
 ## Design Decisions
 
