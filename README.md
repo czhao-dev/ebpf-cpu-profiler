@@ -76,45 +76,33 @@ Architecturally: a **C** eBPF program attached to `perf_event_open` software CPU
 
 ## How It Works
 
-```text
-  CPU software clock event (every N cycles, ~99 Hz)
-         │
-         ▼  (perf_event_open, attached per-CPU)
-  ┌──────────────────────────────────────────┐
-  │      eBPF sampling program (C)            │
-  │  (runs in kernel context, < 1 µs)        │
-  │                                          │
-  │  bpf_get_current_pid_tgid()              │
-  │  bpf_get_stackid() → kernel stack ID     │
-  │  bpf_get_stackid() → user stack ID       │
-  │  increment counts[pid, kstack, ustack]++ │
-  └────────────┬─────────────────────────────┘
-               │  BPF maps (in kernel memory)
-               │  ┌──────────────────────────────┐
-               │  │ BPF_MAP_TYPE_STACK_TRACE      │
-               │  │  stack_id → [ip0, ip1, ...]   │
-               │  │                               │
-               │  │ BPF_MAP_TYPE_HASH             │
-               │  │  (pid, kstack_id, ustack_id)  │
-               │  │  → sample count               │
-               │  └──────────────────────────────┘
-               │
-               ▼  (read periodically by user-space daemon)
-  ┌──────────────────────────────────────────┐
-  │     User-space daemon (Rust + aya)       │
-  │                                          │
-  │  drain BPF maps                          │
-  │  resolve IPs → symbols                   │
-  │   kernel: /proc/kallsyms                 │
-  │   user:   /proc/<pid>/maps + ELF symtab  │
-  │  fold stacks into "a;b;c count" lines    │
-  └────────────────┬─────────────────────────┘
-                   │
-                   ▼
-  ┌──────────────────────────────────────────┐
-  │  SVG Flame Graph (self-contained)        │
-  │  or folded text (for flamegraph.pl)      │
-  └──────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    A["CPU software clock event<br/>(every N cycles, ~99 Hz)"] -->|"perf_event_open<br/>(attached per-CPU)"| B
+
+    subgraph B ["eBPF sampling program (C)<br/>runs in kernel context, &lt; 1 µs"]
+        B1["bpf_get_current_pid_tgid()"]
+        B2["bpf_get_stackid() → kernel stack ID"]
+        B3["bpf_get_stackid() → user stack ID"]
+        B4["increment counts[pid, kstack, ustack]++"]
+    end
+
+    B --> C
+
+    subgraph C ["BPF maps (in kernel memory)"]
+        C1["BPF_MAP_TYPE_STACK_TRACE<br/>stack_id → [ip0, ip1, ...]"]
+        C2["BPF_MAP_TYPE_HASH<br/>(pid, kstack_id, ustack_id) → sample count"]
+    end
+
+    C -->|"read periodically by user-space daemon"| D
+
+    subgraph D ["User-space daemon (Rust + aya)"]
+        D1["drain BPF maps"]
+        D2["resolve IPs → symbols<br/>kernel: /proc/kallsyms<br/>user: /proc/&lt;pid&gt;/maps + ELF symtab"]
+        D3["fold stacks into 'a;b;c count' lines"]
+    end
+
+    D --> E["SVG Flame Graph (self-contained)<br/>or folded text (for flamegraph.pl)"]
 ```
 
 ### eBPF Sampling Program
